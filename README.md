@@ -2,16 +2,24 @@
 
 Hybrid RAG 기반 학생/청년 정부 정책 QnA 시스템. 멀티 LLM (GPT-4o, Claude, Gemini, Llama3) 응답 신뢰성을 3단계 자동 평가 (RAGAS v0.4 + LLM Judge + DeepEval)로 비교하는 파이프라인.
 
-> **구현 현황** (2026-05-17): 수집/검색/생성/평가/FastAPI API/Streamlit UI 전체 완료 (289 tests passed). 정책 2,235건 수집, QA 100쌍 생성, FAISS 인덱스 빌드 완료. UI 4페이지 구현 완료. 멀티클라우드 동기화 추가 — Airflow DAG 4개 체제 (수집+인덱싱+AWS 동기화, DataSync 전용, 평가, QA 생성). AI 코드리뷰 (Qodo PR-Agent + Gemini) 적용.
+> **구현 현황** (2026-06-14): 수집/검색/생성/평가/FastAPI API/Streamlit UI 전체 완료 (289 tests passed). 정책 2,185건 수집, QA 100쌍 생성, FAISS 인덱스 빌드 완료. UI 4페이지 구현 완료. 멀티클라우드 동기화 — Airflow DAG 4개 체제 (수집+인덱싱+AWS 동기화, DataSync 전용, 평가, QA 생성). GPT-5.4 Mini / Gemini 3.5 Flash 평가 지원 추가 (총 7모델). AI 코드리뷰 (Qodo PR-Agent + Gemini) 적용.
+
+---
+
+## 아키텍처
+
+![RAG-QA Pipeline Architecture](docs/rag-qa-architecture.jpg)
+
+> 📎 [draw.io 원본 파일](docs/rag-qa-pipeline.drawio) — 다이어그램 편집 가능
 
 ---
 
 ## 주요 기능
 
 - **Hybrid 검색**: Vector (FAISS) + BM25 + Cross-Encoder Reranker (RRF k=60)
-- **멀티 LLM 비교**: GPT-4o, Claude Sonnet 4.5, Gemini 2.5 Flash/Pro, Llama 3.3 70B — LiteLLM 멀티 프로바이더
+- **멀티 LLM 비교**: GPT-4o/GPT-4o-mini, GPT-5.4 Mini, Claude Sonnet 4.5, Gemini 2.5 Flash/Pro, Gemini 3.5 Flash, Llama 3.3 70B — LiteLLM 멀티 프로바이더 (총 8 모델 키)
 - **3단계 신뢰성 평가**: RAGAS v0.4 정량 / LLM Judge (G-Eval) 정성 / DeepEval 안전성 자동화
-- **FastAPI 백엔드 API**: 6개 엔드포인트 (Health, Search, Generate, Policies, Models, Evaluate)
+- **FastAPI 백엔드 API**: 7개 엔드포인트 (Health, Search, Generate, Policies, Policies/{id}, Models, Evaluate)
 - **정책 도메인 특화**: 온통청년, 공공데이터포털, 한국장학재단, 정부 PDF 보고서 수집
 - **QA 데이터셋 자동 생성**: 정책 원본 → GPT-4o-mini로 100쌍 자동 생성 (`scripts/generate_qa.py`)
 - **GCP 배포**: Cloud Run scale-to-zero (BE FastAPI 2Gi / FE Streamlit 512Mi)
@@ -22,16 +30,10 @@ Hybrid RAG 기반 학생/청년 정부 정책 QnA 시스템. 멀티 LLM (GPT-4o,
 
 ---
 
-## 아키텍처
-
-![RAG-QA Pipeline Architecture](docs/rag-qa-architecture.jpg)
-
-> 📎 [draw.io 원본 파일](docs/rag-qa-pipeline.drawio) — 다이어그램 편집 가능
-
 **데이터 흐름**
 
 1. **수집**: 정부사이트 → collectors → GCS (원본 JSON/PDF) + MongoDB (`policies`, `ingestion_logs`, `gcs_assets`)
-2. **인덱싱**: GCS 원본 → chunker (kss 문장 분리 + tiktoken 토큰 카운트) → embedder → FAISS index + metadata.pkl → GCS 업로드 + MongoDB catalog 동기화
+2. **인덱싱**: GCS 원본 → chunker (kss 문장 분리 + tiktoken 토큰 카운트) → embedder → FAISS index + metadata.json → GCS 업로드 + MongoDB catalog 동기화
 3. **서빙**: Cloud Run 기동 시 GCS에서 FAISS 인덱스 다운로드 → 인메모리 검색
 4. **오케스트레이션**: Airflow DAGs — 수집+인덱싱+AWS 동기화 (매일 02:00 KST), DataSync 전용/평가/QA 생성 (수동 트리거)
 5. **QA 생성**: 정책 원본 → GPT-4o-mini 자동 생성 → `data/eval/qa_pairs.json` + GCS 업로드 + MongoDB (`qa_datasets`, `gcs_assets`) 동기화
@@ -62,20 +64,24 @@ Hybrid RAG 기반 학생/청년 정부 정책 QnA 시스템. 멀티 LLM (GPT-4o,
 | 모니터링 | Grafana + GCP Cloud Monitoring + Cloud Logging |
 | CI/CD | GitHub Actions (경로 필터 기반 자동 배포) |
 | 린터/포매터 | ruff |
-| 테스트 | pytest (261 tests) |
+| 테스트 | pytest (289 tests) |
 
 ### LLM 모델 라우팅
 
 모든 LLM 호출은 LiteLLM을 통해 **프로바이더별로 분산** 라우팅된다:
 
-| 모델 | LiteLLM ID | 프로바이더 | 인증 |
-|------|-----------|----------|------|
-| GPT-4o-mini | `openai/gpt-4o-mini` | OpenAI API 직접 | `OPENAI_API_KEY` |
-| GPT-4o | `openai/gpt-4o` | OpenAI API 직접 | `OPENAI_API_KEY` |
-| Claude Sonnet 4.5 | `vertex_ai/claude-sonnet-4-5` | Vertex AI Model Garden (us-east5) | GCP 서비스 계정 |
-| Gemini 2.5 Flash | `vertex_ai/gemini-2.5-flash` | Vertex AI Model Garden | GCP 서비스 계정 |
-| Gemini 2.5 Pro | `vertex_ai/gemini-2.5-pro` | Vertex AI Model Garden (us-central1) | GCP 서비스 계정 |
-| Llama 3.3 70B | `huggingface/meta-llama/Llama-3.3-70B-Instruct` | HuggingFace Inference API | `HUGGINGFACE_API_KEY` |
+| 모델 키 | LiteLLM ID | 프로바이더 | 인증 |
+|---------|-----------|----------|------|
+| `gpt-4o-mini` | `openai/gpt-4o-mini` | OpenAI API 직접 | `OPENAI_API_KEY` |
+| `gpt-4o` | `openai/gpt-4o` | OpenAI API 직접 | `OPENAI_API_KEY` |
+| `gpt-5.4-mini` | `openai/gpt-5.4-mini` | OpenAI API 직접 | `OPENAI_API_KEY` |
+| `claude-sonnet` | `anthropic/claude-sonnet-4-5` | Anthropic API 직접 | `ANTHROPIC_API_KEY` |
+| `gemini-flash` | `vertex_ai/gemini-2.5-flash` | Vertex AI Model Garden | GCP 서비스 계정 |
+| `gemini-pro` | `vertex_ai/gemini-2.5-pro` | Vertex AI Model Garden (us-central1) | GCP 서비스 계정 |
+| `gemini-3.5-flash` | `vertex_ai/gemini-3.5-flash` | Vertex AI Model Garden (global) | GCP 서비스 계정 |
+| `llama3` | `huggingface/meta-llama/Llama-3.3-70B-Instruct` | HuggingFace Inference API | `HUGGINGFACE_API_KEY` |
+
+모델 키는 `config/models.py`의 `MODELS` dict에 정의되어 있으며, `resolve_model_key()`로 LiteLLM ID로 변환된다. Vertex AI 리전 오버라이드: Gemini 2.5 Pro → `us-central1`, Gemini 3.5 Flash → `global`, Claude Sonnet 4.5 → `us-east5` (`src/generation/llm_client.py`의 `_VERTEX_LOCATION_OVERRIDES`).
 
 임베딩은 OpenAI `text-embedding-3-small` (1536차원)을 LiteLLM `litellm.embedding()` 경유로 호출.
 
@@ -88,22 +94,23 @@ Hybrid RAG 기반 학생/청년 정부 정책 QnA 시스템. 멀티 LLM (GPT-4o,
 정부 청년정책 사이트에서 데이터를 수집하여 `Policy` frozen dataclass로 정규화한다.
 
 ```
-청년센터 API (youthcenter.go.kr)        공공데이터포털 API (data.go.kr)
-        │                                       │
-        ▼                                       ▼
-  YouthGoCollector                      DataPortalCollector
-        │            페이지네이션 (100건/page)     │
-        │            요청 간 2초 sleep              │
-        │            robots.txt 준수               │
-        └──────────────┬───────────────────────────┘
-                       ▼
-              list[Policy]  ← frozen dataclass (16개 필드)
-                │
-                │  validate_policy(): 필수 필드 검증
-                │  normalize_category(): 한국어 → 영문 표준 카테고리
-                │  build_raw_content(): 검색용 원문 텍스트 생성
-                ▼
+공공데이터포털 API (data.go.kr)
+        │
+        ▼
+  DataPortalCollector (현재 활성 수집기)
+        │  페이지네이션 (100건/page)
+        │  요청 간 2초 sleep
+        │  robots.txt 준수
+        ▼
+  list[Policy]  ← frozen dataclass (16개 필드)
+        │
+        │  validate_policy(): 필수 필드 검증
+        │  normalize_category(): 한국어 → 영문 표준 카테고리
+        │  build_raw_content(): 검색용 원문 텍스트 생성
+        ▼
 ```
+
+온통청년(youthcenter.go.kr) 수집은 `scripts/collect_youthgo_sample.py`로 별도 실행 가능 (활성 Collector에서 제외됨).
 
 `Policy` 스키마 (`src/ingestion/collectors/base.py`): `policy_id`, `title`, `category`, `description`, `eligibility`, `benefits`, `how_to_apply`, `application_period`, `managing_department`, `target_age`, `region`, `source_url`, `source_name`, `last_updated`, `raw_content` 등 16개 필드.
 
@@ -124,7 +131,7 @@ list[Policy]
 
 | 저장소 | 역할 | 예시 |
 |--------|------|------|
-| **GCS** | 실제 데이터 저장소 | 정책 raw/processed JSON, QA dataset, QA prompt, FAISS index, metadata.pkl |
+| **GCS** | 실제 데이터 저장소 | 정책 raw/processed JSON, QA dataset, QA prompt, FAISS index, metadata.json |
 | **MongoDB** | 운영 조회용 메타데이터/catalog | 정책 목록, 수집 이력, GCS 객체 목록, QA dataset 요약, QA 샘플 |
 
 MongoDB 컬렉션:
@@ -164,7 +171,7 @@ GCS 원본 JSON
     │  FAISS IndexFlatL2(1536) + metadata dict 리스트
     │
     ▼
-  faiss.index (바이너리) + metadata.pkl (pickle)
+  faiss.index (바이너리) + metadata.json (JSON)
     │
     └──→ GCS 업로드 (gs://bucket/index/)
 ```
@@ -176,7 +183,7 @@ GCS 원본 JSON
 ### 4. 서빙 시 인덱스 로드
 
 Cloud Run 기동 시 (FastAPI lifespan):
-1. GCS에서 `faiss.index` + `metadata.pkl` 다운로드
+1. GCS에서 `faiss.index` + `metadata.json` 다운로드
 2. FAISS 인덱스 메모리 로드 → `app.state.rag_pipeline`
 3. MongoDB 연결 → `app.state.mongo`
 4. 라우트에서 `deps.py`의 `get_rag_pipeline()`, `get_mongo()`로 접근
@@ -208,17 +215,11 @@ Airflow VM (e2-standard-2)
 gs://rag-qna-eval-data/
 ├── policies/
 │   ├── raw/
-│   │   ├── data_portal/
-│   │   │   ├── latest.json
-│   │   │   └── snapshots/<timestamp>.json
-│   │   └── youthgo/
+│   │   └── data_portal/
 │   │       ├── latest.json
 │   │       └── snapshots/<timestamp>.json
 │   └── processed/
 │       ├── all_policies.json
-│       ├── manifest.json
-│       ├── by_source/
-│       │   └── data_portal.json
 │       └── by_category/
 │           ├── education.json
 │           ├── employment.json
@@ -226,12 +227,12 @@ gs://rag-qna-eval-data/
 │           ├── participation.json
 │           └── welfare.json
 ├── eval/
-│   └── qa_pairs.json           # 평가 QA 데이터셋
+│   └── qa_pairs.json           # 평가 QA 데이터셋 (100쌍)
 ├── prompts/
 │   └── qa_generation_system.txt
 ├── index/
-│   ├── faiss.index             # FAISS 벡터 인덱스
-│   └── metadata.pkl            # 청크 메타데이터
+│   ├── faiss.index             # FAISS 벡터 인덱스 (IndexFlatL2, 1536차원)
+│   └── metadata.json           # 청크 메타데이터 (JSON)
 └── results/                    # 평가 JSON/HTML 리포트
 ```
 
@@ -243,20 +244,32 @@ gs://rag-qna-eval-data/
 
 ```
 src/
-├── api/                  # ✅ FastAPI 백엔드 (Cloud Run #1) — 6개 엔드포인트
-│   ├── main.py           # lifespan: FAISS 인덱스 로드 + MongoDB 연결
+├── api/                  # ✅ FastAPI 백엔드 (Cloud Run #1) — 7개 엔드포인트
+│   ├── main.py           # lifespan: FAISS 인덱스 로드 + MongoDB 연결. v0.2.0
 │   ├── deps.py           # FastAPI Depends: get_rag_pipeline(), get_mongo()
 │   ├── schemas.py        # Pydantic 요청/응답 모델
 │   ├── errors.py         # 글로벌 예외 핸들러
-│   ├── middleware.py      # 요청 로깅 미들웨어
+│   ├── middleware.py     # 요청 로깅 미들웨어
+│   ├── auth.py           # API 키 인증 (X-API-Key 헤더)
+│   ├── rate_limit.py     # slowapi 기반 요청 제한 (60/minute)
+│   ├── cloud_run.py      # GCS 인덱스 다운로드 + 상태 확인
+│   ├── monitoring.py     # Cloud Monitoring 커스텀 메트릭
+│   ├── logging_config.py # Cloud Logging 구조화 JSON 로그
+│   ├── costs.py          # 비용 추적 유틸
 │   └── routes/           # search, generate, policies, models, evaluate
 ├── ingestion/            # ✅ 수집 → GCS + MongoDB → FAISS 인덱스 빌드
-│   ├── collectors/       # data_portal (✅ 2,185건), youthgo (✅ 50건)
+│   ├── collectors/       # data_portal (✅ 2,185건, 공공데이터포털 API)
+│   │   ├── base.py       # Policy frozen dataclass (16개 필드) + BaseCollector ABC
+│   │   ├── data_portal.py # DataPortalCollector — 현재 활성 수집기
+│   │   └── region.py     # 지역 코드 ↔ 한국어 이름 변환
 │   ├── chunker.py        # kss 한국어 문장 분리 + tiktoken 토큰 카운트
 │   ├── embedder.py       # LiteLLM embedding API 래퍼 (배치+재시도)
 │   ├── gcs_client.py     # GCS 업로드/다운로드 클라이언트
-│   ├── mongo_client.py   # PolicyMetadataStore (4컬렉션 CRUD)
+│   ├── gcs_catalog.py    # GCS 객체 → MongoDB gcs_assets 동기화
+│   ├── mongo_client.py   # PolicyMetadataStore (CRUD)
+│   ├── policy_store.py   # GCS + MongoDB 통합 저장 오케스트레이터
 │   ├── loader.py         # PDF/TXT/JSON 로더
+│   ├── utils.py          # Policy dict 직렬화 유틸
 │   └── pipeline.py       # 인덱스 빌드 오케스트레이션 (로컬/GCS 모드)
 ├── retrieval/            # ✅ 4가지 검색 전략
 │   ├── vector_store.py   # FAISS 래퍼
@@ -290,12 +303,12 @@ scripts/
 │   └── run_all.py        # 오케스트레이터 (--start, --only, --resume, --dry-run)
 └── ...                   # 기존 수집/평가 스크립트
 data/
-├── policies/raw/         # 수집 데이터 (data_portal 2,185건 + youthgo 50건)
-├── index/                # FAISS 인덱스 (faiss.index 16.5MB + metadata.pkl 3MB)
+├── policies/raw/         # 수집 데이터 (data_portal 2,185건)
+├── index/                # FAISS 인덱스 (faiss.index 16MB + metadata.json 3.3MB)
 ├── eval/qa_pairs.json    # ✅ 평가 QA 데이터셋 (100쌍 생성 완료)
 ├── experiments/          # 실험 파이프라인 step별 JSON 결과
 └── results/              # 평가 결과 JSON
-tests/                    # 289 tests passed
+tests/                    # 289 tests (pytest --collect-only 기준)
 ```
 
 ---
@@ -327,17 +340,18 @@ cp .env.example .env
 ```
 
 ```
-OPENAI_API_KEY=              # GPT-4o/GPT-4o-mini (OpenAI API 직접)
-ANTHROPIC_API_KEY=           # (선택) Claude Sonnet 4.5 — Vertex AI Model Garden 경유 시 불필요
+OPENAI_API_KEY=              # GPT-4o / GPT-4o-mini / GPT-5.4 Mini (OpenAI API 직접)
+ANTHROPIC_API_KEY=           # Claude Sonnet 4.5 (Anthropic API 직접)
 HUGGINGFACE_API_KEY=         # Llama 3.3 70B (HuggingFace Inference API)
 DATA_PORTAL_API_KEY=         # 공공데이터포털 API 키
 MONGODB_URI=mongodb://admin:<password>@<MONGO_VM_IP>:27017/rag_youth_policy?authSource=admin
 MONGODB_DB=rag_youth_policy
-GCP_PROJECT=rag-qna-eval     # Vertex AI (Gemini, Claude) + GCS + Cloud Run
+GCP_PROJECT=rag-qna-eval     # Vertex AI (Gemini) + GCS + Cloud Run
 GCS_BUCKET=rag-qna-eval-data
 VERTEXAI_PROJECT=rag-qna-eval
 VERTEXAI_LOCATION=asia-northeast3
 API_BASE_URL=                # FE -> BE 통신 URL (Cloud Run 배포 시 설정)
+API_KEY=                     # BE API 키 인증 (X-API-Key 헤더, 미설정 시 인증 비활성화)
 ```
 
 ### 실행
@@ -371,7 +385,7 @@ streamlit run src/ui/app.py
 ### 테스트 및 린트
 
 ```bash
-pytest                           # 전체 테스트 (289 passed)
+pytest                           # 전체 테스트 (289개 수집)
 pytest tests/test_api.py         # 단일 모듈
 pytest -k "test_chunk_size"      # 패턴 매칭
 pytest --cov=src --cov-report=term-missing  # 커버리지
@@ -436,7 +450,8 @@ DeepEval Hallucination: "명시적 모순" = hallucination
 
 ```
 실험 1: 모델 비교 (검색 전략 고정: hybrid_rerank)
-  GPT-4o / GPT-4o-mini / Claude Sonnet 4.5 / Gemini 2.5 Flash / Gemini 2.5 Pro / Llama 3.3 70B
+  GPT-4o / GPT-4o-mini / GPT-5.4 Mini / Claude Sonnet 4.5
+  / Gemini 2.5 Flash / Gemini 3.5 Flash / Llama 3.3 70B
 
 실험 2: 검색 전략 비교 (모델 고정: GPT-4o-mini)
   vector_only / bm25_only / hybrid / hybrid_rerank
@@ -457,9 +472,10 @@ DeepEval Hallucination: "명시적 모순" = hallucination
 scripts/experiments/
 ├── __init__.py
 ├── _common.py              # 공유 유틸 (CostTracker, Timer, 체크포인트, JSON I/O)
+│                           # EXPERIMENT_MODELS: 7개 모델 키 정의
 ├── step1_retrieval.py      # 실험 A: 검색 전략 4종 비교 (Context Precision/Recall)
-├── step2_generation.py     # 실험 B: 5모델 × RAG + 1 No-RAG 답변 생성
-├── step3_evaluation.py     # 실험 B+C+D: 3단계 평가 (GPT-4o / GPT-4o-mini 2종 Judge)
+├── step2_generation.py     # 실험 B: 7모델 × RAG + 1 No-RAG 답변 생성
+├── step3_evaluation.py     # 실험 B+C+D: 3단계 평가 (GPT-4o-mini / Gemini 3.1 Pro 2종 Judge)
 ├── step4_judge_comparison.py  # 실험 C: Judge 비용-성능 통계 분석 (Kendall τ, MAE)
 ├── step5_analysis.py       # 실험 D+E: Position Bias + 교차 상관 + 탐지율 분석
 ├── step6_tables_figures.py # 논문 표 6~10 + Plotly 차트 자동 생성
@@ -471,8 +487,8 @@ scripts/experiments/
 | 실험 | 내용 | 주요 지표 |
 |------|------|----------|
 | A: 검색 전략 비교 | `vector_only`, `bm25_only`, `hybrid`, `hybrid_rerank` 4종 비교 | ContextPrecision, ContextRecall |
-| B: 모델 응답 품질 비교 | 5 LLM × RAG + 1 No-RAG 조합 | RAGAS + Judge + Safety 3단계 |
-| C: Judge 비용-성능 분석 | GPT-4o vs GPT-4o-mini Judge 상관관계 분석 | Kendall τ, Spearman ρ, MAE, Agreement Rate |
+| B: 모델 응답 품질 비교 | 7 LLM × RAG + 1 No-RAG 조합 (총 800건) | RAGAS + Judge + Safety 3단계 |
+| C: Judge 비용-성능 분석 | GPT-4o-mini vs Gemini 3.1 Pro Judge 상관관계 분석 | Kendall τ, Spearman ρ, MAE, Agreement Rate |
 | D: Position Bias 완화 검증 | 2회 평가 평균 기법 효과 측정 | Wilcoxon signed-rank test |
 | E: 3단계 평가 교차 상관 | RAGAS / Judge / Safety 상보성 실증 | Spearman ρ, 탐지율 비교 |
 
@@ -495,6 +511,44 @@ python -m scripts.experiments.run_all --only step4 step5 step6
 ```
 
 결과물은 `data/experiments/` 하위에 step별 JSON으로 저장되고, `step6_tables_figures/figures/`에 Plotly 차트 HTML이 생성된다.
+
+---
+
+## 실험 결과 요약 (2026-05-23 기준)
+
+> 전체 결과: [`docs/experiment-results.md`](docs/experiment-results.md)
+
+### 검색 전략 비교 (Step1, N=100)
+
+| 전략 | Context Precision | Context Recall | Latency |
+|------|------------------|---------------|---------|
+| hybrid_rerank | 0.795 | **0.855** | 0.449s |
+| hybrid (RRF) | **0.805** | 0.845 | 0.408s |
+| vector_only | 0.789 | 0.825 | 0.431s |
+| bm25_only | 0.690 | 0.733 | **0.012s** |
+
+Step2 이후 `hybrid_rerank` 고정 (Context Recall 최우선).
+
+### RAGAS 메트릭 (Step3, 모델별 Faithfulness / Answer Relevancy)
+
+| 모델 | Faithfulness | Answer Relevancy | N |
+|------|-------------|-----------------|---|
+| Llama 3.3 70B | **0.982** | 0.511 | 35 |
+| GPT-5.4 Mini | 0.883 | 0.299 | 51 |
+| GPT-4o-mini | 0.859 | **0.531** | 99 |
+| GPT-4o | 0.853 | 0.473 | 100 |
+| Gemini 2.5 Flash | 0.826 | 0.485 | 96 |
+| Claude Sonnet 4.5 | 0.879 | 0.421 | 23 |
+| Gemini 3.5 Flash | 0.720 | 0.431 | 51 |
+| GPT-4o-mini NoRAG | N/A | 0.336 | 100 |
+
+### 핵심 결론
+
+1. **GPT-4o-mini**: 비용 대비 최고 균형 (Answer Relevancy 0.531, Judge Average 4.71)
+2. **GPT-5.4 Mini**: Citation Accuracy 개선(4.76), 그러나 환각률(0.490) GPT-4o-mini(0.368) 대비 증가
+3. **Judge 대체 가능성**: GPT-4o-mini Judge와 Gemini 3.1 Pro Judge 간 Class Agreement **89.7%** → 저비용 Judge로 대체 가능
+4. **3단계 평가 보완성**: 단독 최고 탐지율 33.4% → 3단계 조합 53.7% (+20.3%p)
+5. **Position Bias**: Wilcoxon p>0.05, ≥1점차 최대 6.6% → 2회 평균으로 분산 5.89% 감소
 
 ---
 
@@ -579,8 +633,8 @@ GitHub Secrets에 `GCP_SA_KEY` (서비스 계정 JSON 키) 설정이 필요하�
 
 | 소스 | 데이터 유형 | 수집 방법 | 상태 |
 |------|------------|---------|------|
-| 공공데이터포털 (data.go.kr) | 청년정책 구조화 JSON | REST API | ✅ 2,185건 |
-| 온통청년 (youth.go.kr) | 청년 정책 목록 + 상세 | httpx + BeautifulSoup | ✅ 50건 (샘플) |
+| 공공데이터포털 (data.go.kr) | 청년정책 구조화 JSON | REST API (DataPortalCollector) | ✅ 2,185건 |
+| 온통청년 (youth.go.kr) | 청년 정책 목록 + 상세 | httpx + BeautifulSoup | 별도 스크립트 (`scripts/collect_youthgo_sample.py`) |
 | 한국장학재단 (kosaf.go.kr) | 장학금/학자금 정보 | httpx + BeautifulSoup | 예정 |
 | 정부 PDF 보고서 | 고용/주거 정책 | PyMuPDF | 예정 |
 
